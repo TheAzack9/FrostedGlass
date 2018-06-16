@@ -1,0 +1,13 @@
+bin
+obj
+*.opensdf
+*.sdf
+*.user
+*.suo
+.vs/
+Build/
+Intermediate/
+*.exp
+*.iobj
+*.ipdb
+*.lib

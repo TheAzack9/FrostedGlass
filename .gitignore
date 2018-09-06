@@ -10,3 +10,4 @@ Intermediate/
 *.exp
 *.iobj
 *.ipdb
+*.lib

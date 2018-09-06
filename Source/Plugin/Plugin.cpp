@@ -116,6 +116,9 @@ struct Measure
 {
 	HWND skin;
 	bool isBlurred;
+	AccentState prevState = (AccentState)0;
+	int prevBorder = 0;
+	bool doWarn = true;
 };
 
 PLUGIN_EXPORT void Initialize(void** data, void* rm)
@@ -137,16 +140,21 @@ PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
 	if (_wcsicmp(type.c_str(), L"ACRYLIC") == 0) accent = AccentState::ACRYLIC;
 	if (_wcsicmp(type.c_str(), L"NONE") == 0) accent = AccentState::DISABLED;
 
-	if(IsWindows10OrGreater() && !isAtLeast17063())
+	if(!IsWindows10OrGreater() && !isAtLeast17063() && accent == AccentState::ACRYLIC)
 	{
-		RmLogF(rm, LOG_WARNING, L"Acrylic is not supported on windows 10 builds until build 17063. Falling back to blur.");
+		if (m->doWarn)
+			RmLogF(rm, LOG_WARNING, L"Acrylic is not supported on windows 10 builds until build 17063. Falling back to blur.");
 		accent = AccentState::BLURBEHIND;
 	}
 
-	if(!IsWindows10OrGreater())
+	if(!IsWindows10OrGreater() && (accent == AccentState::ACRYLIC || accent == AccentState::BLURBEHIND))
 	{
-		RmLogF(rm, LOG_WARNING, L"This plugin is not supported on other platforms than Windows 10");
+		if(m->doWarn)
+			RmLogF(rm, LOG_WARNING, L"This plugin is not supported on other platforms than Windows 10");
+
 		accent = AccentState::DISABLED;
+		m->doWarn = m->prevState != accent;
+		m->prevState = accent;
 		return;
 	}
 
@@ -168,7 +176,9 @@ PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
 
 		if(!borderTypes.empty() && !compare(borderTypes, L"|"))
 		{
-			RmLogF(rm, LOG_ERROR, L"Invalid border format, expected | between tokens");
+			if(m->doWarn)
+				RmLogF(rm, LOG_ERROR, L"Invalid border format, expected | between tokens");
+
 			borders = 0;
 			break;
 		}
@@ -177,10 +187,16 @@ PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
 	// backwards compability
 	if (RmReadInt(rm, L"BlurEnabled", 1) == 0) accent = AccentState::DISABLED;
 
+	// If nothing changed, do nothing
+	if (m->prevState == accent && m->prevBorder == borders) return;
+
 	if(!(SetSkinAccent(RmGetSkinWindow(rm), borders, AccentState::DISABLED) &&
 		SetSkinAccent(RmGetSkinWindow(rm), borders, accent)))  {
 		RmLogF(rm, LOG_ERROR, L"Could not load library user32.dll for some unknown reason.");
 	}
+	m->doWarn = m->prevState != accent || m->prevBorder != borders;
+	m->prevState = accent;
+	m->prevBorder = borders;
 }
 
 PLUGIN_EXPORT double Update(void* data)

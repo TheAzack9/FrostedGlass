@@ -3,6 +3,7 @@
 #include <string>
 #include <sstream>
 #include <VersionHelpers.h>
+#include <dwmapi.h>
 
 // Overview: This is a blank canvas on which to build your plugin.
 
@@ -50,6 +51,13 @@ struct WINCOMPATTRDATA
 HINSTANCE hModule;
 typedef BOOL(WINAPI*pSetWindowCompositionAttribute)(HWND, WINCOMPATTRDATA*);
 pSetWindowCompositionAttribute SetWindowCompositionAttribute;
+typedef BOOL(WINAPI* pGetWindowCompositionAttribute)(HWND, WINCOMPATTRDATA*);
+pGetWindowCompositionAttribute GetWindowCompositionAttribute;
+
+HMODULE hDwmApi;
+typedef HRESULT(WINAPI* pDwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
+pDwmSetWindowAttribute SetWindowAttribute;
+
 int references = 0;
 
 bool compare(std::wstring& in, const std::wstring& search)
@@ -65,14 +73,19 @@ bool compare(std::wstring& in, const std::wstring& search)
 	return false;
 }
 
-bool isAtLeast17063()
-{
-	unsigned long long mask = VerSetConditionMask(0, VER_BUILDNUMBER, VER_GREATER_EQUAL);
+bool IsWindowsBuildOrGreater (WORD wMajorVersion, WORD wMinorVersion, DWORD dwBuildNumber) {
+    OSVERSIONINFOEXW osvi = { sizeof (osvi), 0, 0, 0, 0, { 0 }, 0, 0 };
+    DWORDLONG mask = 0;
 
-	OSVERSIONINFOEX versionInfo;
-	versionInfo.dwOSVersionInfoSize = sizeof(versionInfo);
-	versionInfo.dwBuildNumber = 17063;
-	return VerifyVersionInfo(&versionInfo, VER_BUILDNUMBER, mask);
+    mask = VerSetConditionMask(mask, VER_MAJORVERSION, VER_GREATER_EQUAL);
+    mask = VerSetConditionMask(mask, VER_MINORVERSION, VER_GREATER_EQUAL);
+    mask = VerSetConditionMask(mask, VER_BUILDNUMBER, VER_GREATER_EQUAL);
+
+    osvi.dwMajorVersion = wMajorVersion;
+    osvi.dwMinorVersion = wMinorVersion;
+    osvi.dwBuildNumber = dwBuildNumber;
+
+    return VerifyVersionInfoW (&osvi, VER_MAJORVERSION | VER_MINORVERSION | VER_BUILDNUMBER, mask) != FALSE;
 }
 
 bool SetSkinAccent(HWND hwnd, const int& border, const AccentState& state)
@@ -98,6 +111,20 @@ void loadModule()
 		{
 			RmLog(LOG_ERROR, L"Could not load the SetWindowCompositionAttribute function from user32.dll, did microsoft remove it?");
 		}
+
+		GetWindowCompositionAttribute = (pGetWindowCompositionAttribute)GetProcAddress(hModule, "GetWindowCompositionAttribute");
+
+		if (GetWindowCompositionAttribute == NULL)
+		{
+			RmLog(LOG_ERROR, L"Could not load the GetWindowCompositionAttribute function from user32.dll, did microsoft remove it?");
+		}
+
+		hDwmApi = LoadLibrary(L"DWMAPI.dll");
+		SetWindowAttribute = (pDwmSetWindowAttribute)GetProcAddress(hDwmApi, "DwmSetWindowAttribute");
+
+		if (SetWindowAttribute == NULL) {
+			RmLog(LOG_ERROR, L"Could not load the DwmSetWindowAttribute function from DWMAPI.dll");
+		}
 	}
 	references++;
 }
@@ -108,7 +135,9 @@ void unloadModule()
 	if(references <= 0)
 	{
 		FreeLibrary(hModule);
+		FreeLibrary(hDwmApi);
 		SetWindowCompositionAttribute = NULL;
+		SetWindowAttribute = NULL;
 	}
 }
 
@@ -118,6 +147,7 @@ struct Measure
 	bool isBlurred;
 	AccentState prevState = (AccentState)0;
 	int prevBorder = 0;
+	DWM_WINDOW_CORNER_PREFERENCE prevCorner = DWMWCP_DONOTROUND;
 	bool doWarn = true;
 };
 
@@ -137,10 +167,10 @@ PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
 	std::wstring type = RmReadString(rm, L"Type", L"Blur");
 
 	AccentState accent = AccentState::BLURBEHIND;
-	if (_wcsicmp(type.c_str(), L"ACRYLIC") == 0) accent = AccentState::ACRYLIC;
+        if (_wcsicmp(type.c_str(), L"ACRYLIC") == 0) accent = AccentState::ACRYLIC;
 	if (_wcsicmp(type.c_str(), L"NONE") == 0) accent = AccentState::DISABLED;
 
-	if(!IsWindows10OrGreater() && !isAtLeast17063() && accent == AccentState::ACRYLIC)
+	if(!IsWindows10OrGreater() && !IsWindowsBuildOrGreater(10, 0, 17063) && accent == AccentState::ACRYLIC)
 	{
 		if (m->doWarn)
 			RmLogF(rm, LOG_WARNING, L"Acrylic is not supported on windows 10 builds until build 17063. Falling back to blur.");
@@ -194,9 +224,31 @@ PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
 		SetSkinAccent(RmGetSkinWindow(rm), borders, accent)))  {
 		RmLogF(rm, LOG_ERROR, L"Could not load library user32.dll for some unknown reason.");
 	}
-	m->doWarn = m->prevState != accent || m->prevBorder != borders;
+
+	DWM_WINDOW_CORNER_PREFERENCE corner = DWMWCP_DONOTROUND;
+    std::wstring cornerType = RmReadString(rm, L"Corner", L"");
+    if (_wcsicmp(cornerType.c_str(), L"ROUND") == 0) {
+        corner = DWMWCP_ROUND;
+    } else if (_wcsicmp(cornerType.c_str(), L"ROUNDSMALL") == 0) {
+        corner = DWMWCP_ROUNDSMALL;
+    }
+
+    if (IsWindowsBuildOrGreater(10, 0, 22000))
+	{
+		if (SetWindowAttribute) {
+			SetWindowAttribute(RmGetSkinWindow(rm), DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof corner);
+		}
+    } else if (corner != DWMWCP_DONOTROUND) {
+		if (m->doWarn)
+			RmLogF(rm, LOG_WARNING, L"Round corner is not supported on windows 11 builds until build 22000. Falling back to do not round.");
+
+        corner = DWMWCP_DONOTROUND;
+	}
+
+	m->doWarn = m->prevState != accent || m->prevBorder != borders || m->prevCorner != corner;
 	m->prevState = accent;
 	m->prevBorder = borders;
+	m->prevCorner = corner;
 }
 
 PLUGIN_EXPORT double Update(void* data)
